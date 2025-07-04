@@ -1,5 +1,5 @@
 
-# 🔐 Anonymous Feedback System
+# 🔐 Smart Feedback Analyzer
 
 A secure, sentiment-aware feedback collection platform built using **Streamlit**, **NLTK**, and **Matplotlib**. Users can create feedback rooms, submit feedback anonymously, analyze sentiments, and download results – all without needing an account.
 
