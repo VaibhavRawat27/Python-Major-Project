@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from collections import Counter
 import nltk
+import csv
 from nltk.sentiment import SentimentIntensityAnalyzer
 import matplotlib.pyplot as plt
 
@@ -18,12 +19,12 @@ STOPWORDS = set(nltk.corpus.stopwords.words("english"))
 # ───────── App Config ─────────
 DATA_DIR = "rooms"
 os.makedirs(DATA_DIR, exist_ok=True)
-st.set_page_config(page_title="🔐 Anonymous Feedback System", layout="wide")
+st.set_page_config(page_title="🔐 Smart Feedback Analyzer", layout="wide")
 
 # ───────── Helper Functions ─────────
 def create_room(title, description=""):
     room_id = str(uuid.uuid4())[:8]
-    pd.DataFrame(columns=["timestamp", "feedback", "upvotes", "downvotes"]).to_csv(f"{DATA_DIR}/{room_id}.csv", index=False)
+    pd.DataFrame(columns=["timestamp", "feedback", "upvotes", "downvotes"]).to_csv(f"{DATA_DIR}/{room_id}.csv", index=False, quoting=csv.QUOTE_ALL)
     pd.DataFrame([{"room_id": room_id, "title": title, "description": description}]).to_csv(f"{DATA_DIR}/{room_id}_meta.csv", index=False)
     return room_id
 
@@ -32,9 +33,13 @@ def _paths(room_id):
 
 def get_room_data(room_id):
     fb_path, meta_path = _paths(room_id)
-    if os.path.exists(fb_path) and os.path.exists(meta_path):
-        return pd.read_csv(fb_path), pd.read_csv(meta_path).iloc[0], fb_path
-    return None, None, None
+    try:
+        df = pd.read_csv(fb_path, quoting=csv.QUOTE_MINIMAL)
+        meta = pd.read_csv(meta_path).iloc[0]
+        return df, meta, fb_path
+    except Exception as e:
+        st.warning(f"Error loading room data: {e}")
+        return None, None, None
 
 def mask_personal_info(text):
     text = re.sub(r'\b\d{10}\b', '***', text)
@@ -54,14 +59,17 @@ def add_feedback(room_id, text):
             "downvotes": 0,
         }
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        df.to_csv(fb_path, index=False)
+        df.to_csv(fb_path, index=False, quoting=csv.QUOTE_ALL)
 
 def vote_feedback(room_id, row_idx, direction):
     df, _, fb_path = get_room_data(room_id)
-    if df is not None and row_idx in df.index:
+    if df is not None and 0 <= row_idx < len(df):
         col = "upvotes" if direction == "up" else "downvotes"
-        df.at[row_idx, col] += 1
-        df.to_csv(fb_path, index=False)
+        try:
+            df.at[row_idx, col] = int(df.at[row_idx, col]) + 1
+            df.to_csv(fb_path, index=False, quoting=csv.QUOTE_ALL)
+        except Exception as e:
+            st.error(f"Vote error: {e}")
 
 def rate_sentiment(texts):
     if not texts:
@@ -69,6 +77,14 @@ def rate_sentiment(texts):
     scores = [sia.polarity_scores(t)["compound"] for t in texts]
     scaled = ((sum(scores) / len(scores)) + 1) / 2 * 5
     return round(scaled, 2)
+
+def display_star_rating(score):
+    full_stars = int(score)
+    half_star = score - full_stars >= 0.5
+    stars = "⭐" * full_stars
+    if half_star:
+        stars += "✨"
+    return stars.ljust(5, "☆")
 
 def top_keywords(texts, n=5):
     words = re.findall(r"\b[a-zA-Z]{4,}\b", " ".join(texts).lower())
@@ -113,12 +129,10 @@ def summarize_feedback_ai(texts):
         return "No feedback to summarize."
 
     from heapq import nlargest
-
     positive_feedback = []
     negative_feedback = []
     neutral_feedback = []
 
-    # Categorize feedback by sentiment
     for text in texts:
         score = sia.polarity_scores(text)["compound"]
         if score > 0.05:
@@ -128,51 +142,31 @@ def summarize_feedback_ai(texts):
         else:
             neutral_feedback.append(text)
 
-    # Function to extract top sentences from a list of texts
     def extract_key_sentences(feedback_list, num_sentences=2):
         if not feedback_list:
             return ""
-        
         combined_text = " ".join(feedback_list)
         sentences = re.split(r'(?<=[.!?])\s+', combined_text)
         words = re.findall(r'\b\w{4,}\b', combined_text.lower())
         freq = Counter(w for w in words if w not in STOPWORDS)
-
-        sentence_scores = {}
-        for sentence in sentences:
-            sentence_lower = sentence.lower()
-            sentence_score = sum(freq[word] for word in freq if word in sentence_lower)
-            if len(sentence.split()) > 3: # Only consider sentences with more than 3 words
-                sentence_scores[sentence] = sentence_score
-
-        if not sentence_scores:
-            return "" # No meaningful sentences to summarize
-
+        sentence_scores = {
+            sentence: sum(freq[word] for word in freq if word in sentence.lower())
+            for sentence in sentences if len(sentence.split()) > 3
+        }
         summary_sentences = nlargest(num_sentences, sentence_scores, key=sentence_scores.get)
         return " ".join(summary_sentences)
 
-    final_summary_parts = []
-
-    positive_summary = extract_key_sentences(positive_feedback, num_sentences=2)
-    negative_summary = extract_key_sentences(negative_feedback, num_sentences=2)
-    neutral_summary = extract_key_sentences(neutral_feedback, num_sentences=1) # Fewer sentences for neutral
-
-    if positive_summary:
-        final_summary_parts.append(f"**Some users expressed positive sentiment, highlighting:** {positive_summary}")
-    if negative_summary:
-        final_summary_parts.append(f"**On the other hand, some users reported concerns such as:** {negative_summary}")
-    if neutral_summary and not positive_summary and not negative_summary: # Only show neutral if no strong sentiment
-        final_summary_parts.append(f"**A few users had neutral observations, noting:** {neutral_summary}")
-    
-    if not final_summary_parts:
-        return "Summary could not be generated due to insufficient or unclear feedback."
-
-    return "\n\n".join(final_summary_parts)
-
+    parts = []
+    if (ps := extract_key_sentences(positive_feedback)):
+        parts.append(f"**Some users expressed positive sentiment, highlighting:** {ps}")
+    if (ns := extract_key_sentences(negative_feedback)):
+        parts.append(f"**On the other hand, some users reported concerns such as:** {ns}")
+    if (neutral_summary := extract_key_sentences(neutral_feedback, 1)) and not parts:
+        parts.append(f"**Some neutral feedback observed:** {neutral_summary}")
+    return "\n\n".join(parts) if parts else "Summary could not be generated."
 
 # ───────── Streamlit UI ─────────
-
-st.title("🔐 Anonymous Feedback System")
+st.title("🔐 Smart Feedback Analyzer")
 tab1, tab2, tab3, tab4 = st.tabs(["🆕 Create Room", "✍️ Submit Feedback", "📋 View Feedback", "📁 Import File"])
 
 with tab1:
@@ -204,12 +198,19 @@ with tab3:
         if df is not None:
             st.markdown(f"### {meta['title']}")
             st.caption(meta['description'])
-            feedbacks = df["feedback"].tolist()
+            feedbacks = df["feedback"].astype(str).tolist()
 
             if feedbacks:
                 rating = rate_sentiment(feedbacks)
+                stars = display_star_rating(rating)
                 keywords = top_keywords(feedbacks, 10)
-                st.metric("Avg Sentiment", f"{rating}/5")
+
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    st.metric("Avg Sentiment", f"{rating}/5")
+                with col2:
+                    st.markdown(f"**Rating:** {stars}")
+
                 st.markdown(semantic_summary(feedbacks))
 
                 col1, col2 = st.columns(2)
@@ -223,14 +224,14 @@ with tab3:
                         st.info("No keyword data.")
 
                 st.subheader("🧠 AI Summary")
-                # Removed the button and made it generate automatically when feedback is present
                 st.info(summarize_feedback_ai(feedbacks))
 
             st.subheader("📤 Export")
-            st.download_button("Download CSV", df.to_csv(index=False).encode(), f"{view_id}_feedback.csv")
+            st.download_button("Download CSV", df.to_csv(index=False, quoting=csv.QUOTE_ALL).encode(), f"{view_id}_feedback.csv")
 
             st.subheader("📌 Feedbacks")
-            sorted_df = df.sort_values(["upvotes", "downvotes"], ascending=[False, True])
+            sorted_df = df.sort_values(["upvotes", "downvotes"], ascending=[False, True]).reset_index()
+
             for i, row in sorted_df.iterrows():
                 col1, col2, col3 = st.columns([6, 1, 1])
                 with col1:
@@ -238,12 +239,12 @@ with tab3:
                     st.caption(row['timestamp'])
                 with col2:
                     if st.button(f"👍 {row['upvotes']}", key=f"up_{i}"):
-                        vote_feedback(view_id, i, "up")
-                        st.experimental_rerun()
+                        vote_feedback(view_id, row['index'], "up")
+                        st.success("Upvoted!")
                 with col3:
                     if st.button(f"👎 {row['downvotes']}", key=f"down_{i}"):
-                        vote_feedback(view_id, i, "down")
-                        st.experimental_rerun()
+                        vote_feedback(view_id, row['index'], "down")
+                        st.success("Downvoted!")
         else:
             st.error("Invalid Room ID.")
 
@@ -258,7 +259,7 @@ with tab4:
                 existing, _, path = get_room_data(import_id)
                 if existing is not None:
                     combined = pd.concat([existing, new_data], ignore_index=True)
-                    combined.to_csv(path, index=False)
+                    combined.to_csv(path, index=False, quoting=csv.QUOTE_ALL)
                     st.success("Uploaded & merged successfully.")
                 else:
                     st.error("Room not found.")
